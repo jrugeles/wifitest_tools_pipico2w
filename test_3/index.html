@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comunicaciones Digitales</title>
+<style>
+:root{--green:#28a745;--success:#198754;--danger:#dc3545;--bg:#f7f7f7;--text:#222}
+*{box-sizing:border-box}html,body{margin:0;min-height:100%}
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:var(--text);display:flex;flex-direction:column;min-height:100vh;background:var(--bg)}
+header{background:var(--green);color:white;text-align:center;padding:1rem .75rem}h1{margin:0;font-size:1.4rem}
+main{flex:1;display:flex;align-items:center;justify-content:center;padding:1.25rem}
+.card{background:white;border:1px solid #e6e6e6;border-radius:14px;padding:1.5rem;max-width:680px;width:100%;box-shadow:0 2px 10px #0000000f;text-align:center}
+.btn-row{display:flex;gap:.8rem;justify-content:center;flex-wrap:wrap}
+button{border:0;border-radius:12px;padding:.9rem 1.4rem;font-size:1.1rem;font-weight:700;color:white;cursor:pointer;min-width:140px}
+button:disabled{opacity:.5;cursor:wait}button:focus-visible{outline:3px solid #222;outline-offset:3px}
+.ok{background:var(--success)}.cancel{background:var(--danger)}
+.status{margin:.3rem 0 1.2rem;color:#555}.pill{display:inline-block;padding:.35rem .7rem;border-radius:999px;font-weight:700;color:white;margin-left:.4rem}
+.pill.on{background:var(--success)}.pill.off{background:var(--danger)}.pill.unknown{background:#626975}
+.message{min-height:2.8em;font-size:.95rem;color:#555;margin:1.2rem 0 0}.message.error{color:#b42318}
+footer{text-align:center;padding:.9rem;color:#666;font-size:.9rem}
+.traffic{border-top:1px solid #ddd;margin-top:1.5rem;padding-top:1rem}
+h2{font-size:1.15rem;margin:0 0 .8rem}.traffic button{min-width:130px;font-size:.95rem}
+.test{background:#176b91}.stop{background:#555}.hint{font-size:.88rem;color:#555;line-height:1.5}
+select{font:inherit;padding:.4rem;margin:0 .4rem 1rem;border:1px solid #aaa;border-radius:6px}
+.stats{display:flex;justify-content:center;gap:1rem;flex-wrap:wrap;font-size:.9rem;margin:.8rem 0}
+#phase{font-weight:700;min-height:1.5em}button:disabled{cursor:default}
+</style>
+</head>
+<body>
+<header><h1>Comunicaciones Digitales @jrugelesuribe</h1></header>
+<main><div class="card">
+<div class="status" role="status" aria-live="polite">LED:<span id="led-pill" class="pill unknown">Consultando…</span></div>
+<div class="btn-row">
+<button id="btn-on" class="ok" disabled>LED ON</button>
+<button id="btn-off" class="cancel" disabled>LED OFF</button>
+</div>
+<p id="message" class="message" role="status" aria-live="polite">Conectando con la Pico…</p>
+<section class="traffic" aria-labelledby="traffic-title">
+<h2 id="traffic-title">Prueba de tráfico WiFi</h2>
+<label for="duration">Duración:</label><select id="duration"><option value="10">10 s</option><option value="30" selected>30 s</option><option value="60">60 s</option></select>
+<div class="btn-row">
+<button id="intermittent" class="test" disabled>Intermitente</button>
+<button id="sustained" class="test" disabled>Sostenido</button>
+<button id="stop" class="stop" disabled>Detener</button>
+</div>
+<p id="phase" role="status" aria-live="polite">Prueba detenida</p>
+<div class="stats"><span>Tiempo: <b id="elapsed">0.0 s</b></span><span>Recibido: <b id="received">0.00 MiB</b></span><span>Promedio: <b id="rate">0.00 Mb/s</b></span></div>
+<p class="hint">Intermitente: 2 s de tráfico y 3 s de pausa.<br>Sostenido: descargas sucesivas sin pausa programada.<br>Datos desde la Pico hacia este dispositivo. No requiere Internet.</p>
+<p class="hint">Manténga esta página visible.</p>
+
+</section>
+<noscript>Activa JavaScript para controlar el LED.</noscript>
+</div></main>
+<footer>&copy; Ingeniería en Telecomunicaciones UMNG</footer>
+<script>
+'use strict';
+const POLL_MS = 2000, TIMEOUT_MS = 5000, TRANSFER_TIMEOUT_MS = 10000;
+const pill = document.getElementById('led-pill');
+const message = document.getElementById('message');
+const buttons = ['btn-on', 'btn-off'].map(id => document.getElementById(id));
+const startButtons = ['intermittent', 'sustained'].map(id => document.getElementById(id));
+const stopButton = document.getElementById('stop');
+const duration = document.getElementById('duration');
+const phase = document.getElementById('phase');
+let busy = false, timer = null, session = null;
+
+function controls() {
+  buttons.concat(startButtons).forEach(button => button.disabled = busy || session !== null);
+  stopButton.disabled = session === null;
+  duration.disabled = session !== null;
+}
+function setMessage(text, error = false) {
+  message.textContent = text;
+  message.className = 'message' + (error ? ' error' : '');
+}
+async function request(path, method, binary = false, parent = null) {
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  if (parent) {
+    parent.addEventListener('abort', cancel);
+    if (parent.aborted) cancel();
+  }
+  const timeout = setTimeout(cancel, binary ? TRANSFER_TIMEOUT_MS : TIMEOUT_MS);
+  try {
+    const response = await fetch(path, {method, cache:'no-store', signal:controller.signal,
+      headers:{'Accept':binary ? 'application/octet-stream' : 'application/json'}});
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    if (binary) {
+      if (!(response.headers.get('Content-Type') || '').startsWith('application/octet-stream')) {
+        throw new Error('Actualiza main.py: la ruta de tráfico no devuelve datos binarios.');
+      }
+      const data = await response.arrayBuffer();
+      const expected = Number(response.headers.get('Content-Length'));
+      if (!expected || data.byteLength !== expected) throw new Error('Descarga incompleta');
+      return data.byteLength;
+    }
+    const data = await response.json();
+    if (!data || typeof data.on !== 'boolean' || (method === 'POST' && data.ok !== true)) {
+      throw new Error('Respuesta no válida');
+    }
+    return data;
+  } finally {
+    clearTimeout(timeout);
+    if (parent) parent.removeEventListener('abort', cancel);
+  }
+}
+async function update(path = '/state', method = 'GET') {
+  if (busy || session) return;
+  busy = true;
+  clearTimeout(timer);
+  controls();
+  if (method === 'POST') setMessage('Enviando orden…');
+  try {
+    const data = await request(path, method);
+    pill.textContent = data.on ? 'ON' : 'OFF';
+    pill.className = 'pill ' + (data.on ? 'on' : 'off');
+    setMessage('Estado confirmado por la Pico.');
+  } catch (error) {
+    pill.textContent = 'Desconocido';
+    pill.className = 'pill unknown';
+    setMessage('Sin confirmación. Comprueba la conexión WiFi; se reintentará automáticamente.', true);
+  } finally {
+    busy = false;
+    controls();
+    if (!session) timer = setTimeout(() => update(), POLL_MS);
+  }
+}
+function statistics(run) {
+  const seconds = Math.max(0, (performance.now() - run.started) / 1000);
+  document.getElementById('elapsed').textContent = seconds.toFixed(1) + ' s';
+  document.getElementById('received').textContent = (run.bytes / 1048576).toFixed(2) + ' MiB';
+  document.getElementById('rate').textContent = (seconds ? run.bytes * 8 / seconds / 1e6 : 0).toFixed(2) + ' Mb/s';
+}
+function pause(ms, signal) {
+  return new Promise(resolve => {
+    let id;
+    const done = () => { clearTimeout(id); signal.removeEventListener('abort', done); resolve(); };
+    signal.addEventListener('abort', done);
+    id = setTimeout(done, ms);
+    if (signal.aborted) done();
+  });
+}
+function stopTraffic(reason = 'Prueba detenida') {
+  if (session) {
+    session.reason = reason;
+    session.controller.abort();
+    phase.textContent = 'Deteniendo…';
+  }
+}
+async function startTraffic(mode) {
+  if (busy || session || document.hidden) return;
+  const seconds = Number(duration.value);
+  if (![10, 30, 60].includes(seconds)) return;
+  clearTimeout(timer);
+  const run = {controller:new AbortController(), started:performance.now(), bytes:0,
+    reason:'Prueba completada'};
+  session = run;
+  controls();
+  setMessage('Consulta del LED pausada durante la prueba. El indicador conserva el último estado confirmado.');
+  statistics(run);
+  const tick = setInterval(() => statistics(run), 250);
+  const deadline = setTimeout(() => {run.reason = 'Prueba completada'; run.controller.abort();}, seconds * 1000);
+  try {
+    while (!run.controller.signal.aborted) {
+      phase.textContent = mode === 'intermittent' ? 'Intermitente · transmitiendo' : 'Sostenido · transmitiendo';
+      const burstEnd = performance.now() + 2000;
+      do {
+        run.bytes += await request('/traffic', 'GET', true, run.controller.signal);
+        statistics(run);
+      } while (!run.controller.signal.aborted && (mode === 'sustained' || performance.now() < burstEnd));
+      if (mode === 'intermittent' && !run.controller.signal.aborted) {
+        phase.textContent = 'Intermitente · pausa de 3 s';
+        await pause(3000, run.controller.signal);
+      }
+    }
+  } catch (error) {
+    if (!run.controller.signal.aborted) run.reason = 'Prueba interrumpida: ' + error.message;
+  } finally {
+    clearTimeout(deadline);
+    clearInterval(tick);
+    statistics(run);
+    session = null;
+    phase.textContent = run.reason;
+    controls();
+    update();
+  }
+}
+buttons[0].addEventListener('click', () => update('/on', 'POST'));
+buttons[1].addEventListener('click', () => update('/off', 'POST'));
+startButtons[0].addEventListener('click', () => startTraffic('intermittent'));
+startButtons[1].addEventListener('click', () => startTraffic('sustained'));
+stopButton.addEventListener('click', () => stopTraffic());
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopTraffic('Prueba detenida al ocultar la página');
+});
+window.addEventListener('pagehide', () => stopTraffic('Página cerrada'));
+update();
+</script>
+</body>
+</html>

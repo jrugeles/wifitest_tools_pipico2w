@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comunicaciones Digitales</title>
+<style>
+:root{--green:#28a745;--success:#198754;--danger:#dc3545;--bg:#f7f7f7;--text:#222}
+*{box-sizing:border-box}html,body{margin:0;min-height:100%}
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:var(--text);display:flex;flex-direction:column;min-height:100vh;background:var(--bg)}
+header{background:var(--green);color:white;text-align:center;padding:1rem .75rem}h1{margin:0;font-size:1.4rem}
+main{flex:1;display:flex;align-items:center;justify-content:center;padding:1.25rem}
+.card{background:white;border:1px solid #e6e6e6;border-radius:14px;padding:1.5rem;max-width:520px;width:100%;box-shadow:0 2px 10px #0000000f;text-align:center}
+.btn-row{display:flex;gap:.8rem;justify-content:center;flex-wrap:wrap}
+button{border:0;border-radius:12px;padding:.9rem 1.4rem;font-size:1.1rem;font-weight:700;color:white;cursor:pointer;min-width:140px}
+button:disabled{opacity:.5;cursor:wait}button:focus-visible{outline:3px solid #222;outline-offset:3px}
+.ok{background:var(--success)}.cancel{background:var(--danger)}
+.status{margin:.3rem 0 1.2rem;color:#555}.pill{display:inline-block;padding:.35rem .7rem;border-radius:999px;font-weight:700;color:white;margin-left:.4rem}
+.pill.on{background:var(--success)}.pill.off{background:var(--danger)}.pill.unknown{background:#626975}
+.message{min-height:2.8em;font-size:.95rem;color:#555;margin:1.2rem 0 0}.message.error{color:#b42318}
+footer{text-align:center;padding:.9rem;color:#666;font-size:.9rem}
+</style>
+</head>
+<body>
+<header><h1>Comunicaciones Digitales @jrugelesuribe</h1></header>
+<main><div class="card">
+<div class="status" role="status" aria-live="polite">LED:<span id="led-pill" class="pill unknown">Consultando…</span></div>
+<div class="btn-row">
+<button id="btn-on" class="ok" disabled>LED ON</button>
+<button id="btn-off" class="cancel" disabled>LED OFF</button>
+</div>
+<p id="message" class="message" role="status" aria-live="polite">Conectando con la Pico…</p>
+<noscript>Activa JavaScript para controlar el LED.</noscript>
+</div></main>
+<footer>&copy; Ingeniería en Telecomunicaciones UMNG</footer>
+<script>
+'use strict';
+const POLL_MS = 2000;
+const TIMEOUT_MS = 5000;
+const pill = document.getElementById('led-pill');
+const message = document.getElementById('message');
+const buttons = [document.getElementById('btn-on'), document.getElementById('btn-off')];
+let busy = false;
+let timer = null;
+
+function setState(on) {
+  pill.textContent = on ? 'ON' : 'OFF';
+  pill.className = 'pill ' + (on ? 'on' : 'off');
+}
+function setMessage(text, error = false) {
+  message.textContent = text;
+  message.className = 'message' + (error ? ' error' : '');
+}
+async function requestJSON(path, method) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const response = await fetch(path, {
+      method, cache: 'no-store', signal: controller.signal,
+      headers: {'Accept': 'application/json'}
+    });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const data = await response.json();
+    if (!data || typeof data.on !== 'boolean' || (method === 'POST' && data.ok !== true)) {
+      throw new Error('Respuesta no válida');
+    }
+    return data;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+async function update(path = '/state', method = 'GET') {
+  if (busy) return;
+  busy = true;
+  clearTimeout(timer);
+  buttons.forEach(button => button.disabled = true);
+  if (method === 'POST') setMessage('Enviando orden…');
+  try {
+    const data = await requestJSON(path, method);
+    setState(data.on);
+    setMessage('Estado confirmado por la Pico.');
+  } catch (error) {
+    pill.textContent = 'Desconocido';
+    pill.className = 'pill unknown';
+    setMessage('Sin confirmación. Comprueba la conexión WiFi con la Pico; se reintentará automáticamente.', true);
+    console.warn('No se pudo confirmar el estado:', error);
+  } finally {
+    busy = false;
+    buttons.forEach(button => button.disabled = false);
+    // Solo una solicitud a la vez. Nunca repetir automaticamente una orden POST.
+    timer = setTimeout(() => update(), POLL_MS);
+  }
+}
+buttons[0].addEventListener('click', () => update('/on', 'POST'));
+buttons[1].addEventListener('click', () => update('/off', 'POST'));
+update();
+</script>
+</body>
+</html>
